@@ -1,7 +1,7 @@
 /*
  * Zadig: Automated Driver Installer for USB devices (GUI version)
  * Networking functionality (web file download, check for update, etc.)
- * Copyright © 2012-2017 Pete Batard <pete@akeo.ie>
+ * Copyright © 2012-2021 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -376,7 +376,7 @@ DWORD DownloadFile(const char* url, const char* file, HWND hProgressDialog)
 			dprintf("Error writing file '%s': %s\n", &file[last_slash], WinInetErrorString());
 			goto out;
 		} else if (dwDownloaded != dwWritten) {
-			dprintf("Error writing file '%s': Only %d/%d bytes written\n", dwWritten, dwDownloaded);
+			dprintf("Error writing file '%s': Only %d/%d bytes written\n", &file[last_slash], dwWritten, dwDownloaded);
 			goto out;
 		}
 	}

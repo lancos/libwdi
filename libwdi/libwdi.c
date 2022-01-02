@@ -1,6 +1,6 @@
 /*
  * Library for USB automated driver installation
- * Copyright (c) 2010-2020 Pete Batard <pete@akeo.ie>
+ * Copyright (c) 2010-2021 Pete Batard <pete@akeo.ie>
  * Parts of the code from libusb by Daniel Drake, Johannes Erdfelt et al.
  * For more info, please visit http://libwdi.akeo.ie
  *
@@ -38,6 +38,7 @@
 #include <sddl.h>
 #include <fcntl.h>
 #include <wincrypt.h>
+#include <winternl.h>
 
 #include "installer.h"
 #include "libwdi.h"
@@ -59,6 +60,7 @@ static const char* inf_template[WDI_NB_DRIVERS-1] = {"winusb.inf.in", "libusb0.i
 static const char* cat_template[WDI_NB_DRIVERS-1] = {"winusb.cat.in", "libusb0.cat.in", "libusbk.cat.in", "usbser.cat.in"};
 static const char* ms_compat_id[WDI_NB_DRIVERS-1] = {"MS_COMP_WINUSB", "MS_COMP_LIBUSB0", "MS_COMP_LIBUSBK", "MS_COMP_USBSER"};
 int nWindowsVersion = WINDOWS_UNDEFINED;
+int nWindowsBuildNumber = -1;
 char WindowsVersionStr[128] = "Windows ";
 
 // Detect Windows version
@@ -76,27 +78,129 @@ BOOL is_x64(void)
 	return ret;
 }
 
-// From smartmontools os_win32.cpp
+static const char* GetEdition(DWORD ProductType)
+{
+	static char unknown_edition_str[64];
+
+	// From: https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getproductinfo
+	// These values can be found in the winnt.h header.
+	switch (ProductType) {
+	case 0x00000000: return "";	//  Undefined
+	case 0x00000001: return "Ultimate";
+	case 0x00000002: return "Home Basic";
+	case 0x00000003: return "Home Premium";
+	case 0x00000004: return "Enterprise";
+	case 0x00000005: return "Home Basic N";
+	case 0x00000006: return "Business";
+	case 0x00000007: return "Server Standard";
+	case 0x00000008: return "Server Datacenter";
+	case 0x00000009: return "Smallbusiness Server";
+	case 0x0000000A: return "Server Enterprise";
+	case 0x0000000B: return "Starter";
+	case 0x0000000C: return "Server Datacenter (Core)";
+	case 0x0000000D: return "Server Standard (Core)";
+	case 0x0000000E: return "Server Enterprise (Core)";
+	case 0x00000010: return "Business N";
+	case 0x00000011: return "Web Server";
+	case 0x00000012: return "HPC Edition";
+	case 0x00000013: return "Storage Server (Essentials)";
+	case 0x0000001A: return "Home Premium N";
+	case 0x0000001B: return "Enterprise N";
+	case 0x0000001C: return "Ultimate N";
+	case 0x00000022: return "Home Server";
+	case 0x00000024: return "Server Standard without Hyper-V";
+	case 0x00000025: return "Server Datacenter without Hyper-V";
+	case 0x00000026: return "Server Enterprise without Hyper-V";
+	case 0x00000027: return "Server Datacenter without Hyper-V (Core)";
+	case 0x00000028: return "Server Standard without Hyper-V (Core)";
+	case 0x00000029: return "Server Enterprise without Hyper-V (Core)";
+	case 0x0000002A: return "Hyper-V Server";
+	case 0x0000002F: return "Starter N";
+	case 0x00000030: return "Pro";
+	case 0x00000031: return "Pro N";
+	case 0x00000034: return "Server Solutions Premium";
+	case 0x00000035: return "Server Solutions Premium (Core)";
+	case 0x00000040: return "Server Hyper Core V";
+	case 0x00000042: return "Starter E";
+	case 0x00000043: return "Home Basic E";
+	case 0x00000044: return "Premium E";
+	case 0x00000045: return "Pro E";
+	case 0x00000046: return "Enterprise E";
+	case 0x00000047: return "Ultimate E";
+	case 0x00000048: return "Enterprise (Eval)";
+	case 0x0000004F: return "Server Standard (Eval)";
+	case 0x00000050: return "Server Datacenter (Eval)";
+	case 0x00000054: return "Enterprise N (Eval)";
+	case 0x00000057: return "Thin PC";
+	case 0x00000058: case 0x00000059: case 0x0000005A: case 0x0000005B: case 0x0000005C: return "Embedded";
+	case 0x00000062: return "Home N";
+	case 0x00000063: return "Home China";
+	case 0x00000064: return "Home Single Language";
+	case 0x00000065: return "Home";
+	case 0x00000067: return "Pro with Media Center";
+	case 0x00000069: case 0x0000006A: case 0x0000006B: case 0x0000006C: return "Embedded";
+	case 0x0000006F: return "Home Connected";
+	case 0x00000070: return "Pro Student";
+	case 0x00000071: return "Home Connected N";
+	case 0x00000072: return "Pro Student N";
+	case 0x00000073: return "Home Connected Single Language";
+	case 0x00000074: return "Home Connected China";
+	case 0x00000079: return "Education";
+	case 0x0000007A: return "Education N";
+	case 0x0000007D: return "Enterprise LTSB";
+	case 0x0000007E: return "Enterprise LTSB N";
+	case 0x0000007F: return "Pro S";
+	case 0x00000080: return "Pro S N";
+	case 0x00000081: return "Enterprise LTSB (Eval)";
+	case 0x00000082: return "Enterprise LTSB N (Eval)";
+	case 0x0000008A: return "Pro Single Language";
+	case 0x0000008B: return "Pro China";
+	case 0x0000008C: return "Enterprise Subscription";
+	case 0x0000008D: return "Enterprise Subscription N";
+	case 0x00000091: return "Server Datacenter SA (Core)";
+	case 0x00000092: return "Server Standard SA (Core)";
+	case 0x00000095: return "Utility VM";
+	case 0x000000A1: return "Pro for Workstations";
+	case 0x000000A2: return "Pro for Workstations N";
+	case 0x000000A4: return "Pro for Education";
+	case 0x000000A5: return "Pro for Education N";
+	case 0x000000AB: return "Enterprise G";	// I swear Microsoft are just making up editions...
+	case 0x000000AC: return "Enterprise G N";
+	case 0x000000B6: return "Home OS";
+	case 0x000000B7: return "Cloud E";
+	case 0x000000B8: return "Cloud E N";
+	case 0x000000BD: return "Lite";
+	case 0xABCDABCD: return "(Unlicensed)";
+	default:
+		static_sprintf(unknown_edition_str, "(Unknown Edition 0x%02X)", (uint32_t)ProductType);
+		return unknown_edition_str;
+	}
+}
+
+/*
+ * Modified from smartmontools' os_win32.cpp
+ */
 void GetWindowsVersion(void)
 {
 	OSVERSIONINFOEXA vi, vi2;
+	DWORD dwProductType;
 	const char* w = 0;
 	const char* w64 = "32 bit";
-	char *vptr, build_number[10] = "";
+	char* vptr;
 	size_t vlen;
 	unsigned major, minor;
 	ULONGLONG major_equal, minor_equal;
 	BOOL ws;
 
 	nWindowsVersion = WINDOWS_UNDEFINED;
-	safe_strcpy(WindowsVersionStr, sizeof(WindowsVersionStr), "Windows Undefined");
+	static_strcpy(WindowsVersionStr, "Windows Undefined");
 
 	memset(&vi, 0, sizeof(vi));
 	vi.dwOSVersionInfoSize = sizeof(vi);
-	if (!GetVersionExA((OSVERSIONINFOA *)&vi)) {
+	if (!GetVersionExA((OSVERSIONINFOA*)&vi)) {
 		memset(&vi, 0, sizeof(vi));
 		vi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
-		if (!GetVersionExA((OSVERSIONINFOA *)&vi))
+		if (!GetVersionExA((OSVERSIONINFOA*)&vi))
 			return;
 	}
 
@@ -136,22 +240,35 @@ void GetWindowsVersion(void)
 			ws = (vi.wProductType <= VER_NT_WORKSTATION);
 			nWindowsVersion = vi.dwMajorVersion << 4 | vi.dwMinorVersion;
 			switch (nWindowsVersion) {
-			case 0x61: w = (ws ? "7" : "2008_R2");
+			case 0x51: w = "XP";
 				break;
-			case 0x62: w = (ws ? "8" : "2012");
+			case 0x52: w = (!GetSystemMetrics(89) ? "Server 2003" : "Server 2003_R2");
 				break;
-			case 0x63: w = (ws ? "8.1" : "2012_R2");
+			case 0x60: w = (ws ? "Vista" : "Server 2008");
+				break;
+			case 0x61: w = (ws ? "7" : "Server 2008_R2");
+				break;
+			case 0x62: w = (ws ? "8" : "Server 2012");
+				break;
+			case 0x63: w = (ws ? "8.1" : "Server 2012_R2");
 				break;
 			case 0x64: w = (ws ? "10 (Preview 1)" : "Server 10 (Preview 1)");
 				break;
 				// Starting with Windows 10 Preview 2, the major is the same as the public-facing version
-			case 0xA0: w = (ws ? "10" : "Server 10");
+			case 0xA0:
+				if (vi.dwBuildNumber < 20000) {
+					w = (ws ? "10" : ((vi.dwBuildNumber < 17763) ? "Server 2016" : "Server 2019"));
+					break;
+				}
+				nWindowsVersion = 0xB0;
+				// Fall through
+			case 0xB0: w = (ws ? "11" : "Server 2022");
 				break;
 			default:
-				if (nWindowsVersion < 0x61)
+				if (nWindowsVersion < 0x51)
 					nWindowsVersion = WINDOWS_UNSUPPORTED;
 				else
-					w = "11 or later";
+					w = "12 or later";
 				break;
 			}
 		}
@@ -160,6 +277,7 @@ void GetWindowsVersion(void)
 	if (is_x64())
 		w64 = "64-bit";
 
+	GetProductInfo(vi.dwMajorVersion, vi.dwMinorVersion, vi.wServicePackMajor, vi.wServicePackMinor, &dwProductType);
 	vptr = &WindowsVersionStr[sizeof("Windows ") - 1];
 	vlen = sizeof(WindowsVersionStr) - sizeof("Windows ") - 1;
 	if (!w)
@@ -170,19 +288,29 @@ void GetWindowsVersion(void)
 	else if (vi.wServicePackMajor)
 		safe_sprintf(vptr, vlen, "%s SP%u %s", w, vi.wServicePackMajor, w64);
 	else
-		safe_sprintf(vptr, vlen, "%s %s", w, w64);
+		safe_sprintf(vptr, vlen, "%s%s%s, %s",
+			w, (dwProductType != PRODUCT_UNDEFINED) ? " " : "", GetEdition(dwProductType), w64);
 
-	// Add the build number for Windows 8.0 and later
+	// Add the build number (including UBR if available) for Windows 8.0 and later
+	nWindowsBuildNumber = vi.dwBuildNumber;
 	if (nWindowsVersion >= 0x62) {
-		ReadRegistryStr(REGKEY_HKLM, "Microsoft\\Windows NT\\CurrentVersion\\CurrentBuildNumber", build_number, sizeof(build_number));
-		if (build_number[0] != 0) {
-			safe_strcat(WindowsVersionStr, sizeof(WindowsVersionStr), " (Build ");
-			safe_strcat(WindowsVersionStr, sizeof(WindowsVersionStr), build_number);
-			safe_strcat(WindowsVersionStr, sizeof(WindowsVersionStr), ")");
+		HKEY hCurrentVersion;
+		DWORD dwType = REG_DWORD, dwSize = sizeof(DWORD), dwUbr = 0;
+		if (RegOpenKeyExA(REGKEY_HKLM, "Software\\Microsoft\\Windows NT\\CurrentVersion",
+			0, KEY_READ, &hCurrentVersion) == ERROR_SUCCESS) {
+			RegQueryValueExA(hCurrentVersion, "UBR", NULL, &dwType, (LPBYTE)&dwUbr, &dwSize);
+			RegCloseKey(hCurrentVersion);
 		}
-	}
 
+		vptr = &WindowsVersionStr[safe_strlen(WindowsVersionStr)];
+		vlen = sizeof(WindowsVersionStr) - safe_strlen(WindowsVersionStr) - 1;
+		if (dwUbr != 0)
+			safe_sprintf(vptr, vlen, " (Build %d.%d)", nWindowsBuildNumber, (int)dwUbr);
+		else
+			safe_sprintf(vptr, vlen, " (Build %d)", nWindowsBuildNumber);
+	}
 }
+
 /*
  * Converts a windows error to human readable string
  * uses retval as errorcode, or, if 0, use GetLastError()
@@ -205,10 +333,10 @@ static char err_string[STR_BUFFER_SIZE];
 	if (size == 0) {
 		format_error = GetLastError();
 		if (format_error)
-			static_sprintf(err_string, "Windows error code %u (FormatMessage error code %u)",
+			static_sprintf(err_string, "Windows error code 0x%08lX (FormatMessage error code 0x%08lX)",
 				error_code, format_error);
 		else
-			static_sprintf(err_string, "Unknown error code %u", error_code);
+			static_sprintf(err_string, "Unknown error code 0x%08lX", error_code);
 	} else {
 		// Remove CR/LF terminators
 		for (i=safe_strlen(err_string)-1; ((err_string[i]==0x0A) || (err_string[i]==0x0D)); i--) {
@@ -1003,9 +1131,9 @@ static int extract_binaries(const char* path)
 	return WDI_SUCCESS;
 }
 
-// tokenizes a resource stored in resource.h
-static long tokenize_internal(const char* resource_name, char** dst, const token_entity_t* token_entities,
-					   const char* tok_prefix, const char* tok_suffix, int recursive)
+// tokenizes a resource stored in resource.h and write it to file <dst>
+static long wdi_tokenize_resource(const char* resource_name, char** dst, const token_entity_t* token_entities,
+								  const char* tok_prefix, const char* tok_suffix, int recursive)
 {
 	int i;
 
@@ -1022,10 +1150,47 @@ static long tokenize_internal(const char* resource_name, char** dst, const token
 	return -ERROR_RESOURCE_DATA_NOT_FOUND;
 }
 
+// tokenizes an external file pointed by <src> into destination file <dst>
+static long wdi_tokenize_file(const char* src, char** dst, const token_entity_t* token_entities,
+							  const char* tok_prefix, const char* tok_suffix, int recursive)
+{
+	FILE* fd = NULL;
+	long size, ret = -ERROR_RESOURCE_DATA_NOT_FOUND;
+	char* buffer = NULL;
+
+	fd = fopen(src, "r");
+	if (fd == NULL)
+		goto out;
+	fseek(fd, 0L, SEEK_END);
+	size = ftell(fd);
+	if (size < 0)
+		goto out;
+	fseek(fd, 0L, SEEK_SET);
+	// +1  for NUL terminator since we pass the whole file as a text string
+	buffer = (char*)calloc(size + 1, 1);
+	if (buffer == NULL) {
+		wdi_err("Could not allocate tokenization buffer");
+		ret = WDI_ERROR_RESOURCE;
+		goto out;
+	}
+	if (fread(buffer, 1, size, fd) != size) {
+		wdi_err("Could not read file to tokenize");
+		ret = -ERROR_RESOURCE_DATA_NOT_FOUND;
+		goto out;
+	}
+	ret = tokenize_string(buffer, size, dst, token_entities, tok_prefix, tok_suffix, recursive);
+
+out:
+	free(buffer);
+	if (fd)
+		fclose(fd);
+	return ret;
+}
+
 #define CAT_LIST_MAX_ENTRIES 16
 // Create an inf and extract coinstallers in the directory pointed by path
 int LIBWDI_API wdi_prepare_driver(struct wdi_device_info* device_info, const char* path,
-								  const char* inf_name, struct wdi_options_prepare_driver* options)
+								  const char* inf, struct wdi_options_prepare_driver* options)
 {
 	const wchar_t bom = 0xFEFF;
 #if defined(ENABLE_DEBUG_LOGGING) || defined(INCLUDE_DEBUG_LOGGING)
@@ -1035,15 +1200,17 @@ int LIBWDI_API wdi_prepare_driver(struct wdi_device_info* device_info, const cha
 	const char* vendor_name = NULL;
 	const char* cat_list[CAT_LIST_MAX_ENTRIES+1];
 	char drv_path[MAX_PATH], inf_path[MAX_PATH], cat_path[MAX_PATH], hw_id[40], cert_subject[64];
-	char *strguid, *token, *cat_name = NULL, *dst = NULL, *cat_in_copy = NULL;
+	char *strguid, *token, *cat_name = NULL, *dst = NULL, *inf_name;
 	wchar_t *wdst = NULL;
 	int i, nb_entries, driver_type = WDI_WINUSB, r = WDI_ERROR_OTHER;
 	long inf_file_size, cat_file_size;
-	BOOL is_android_device = FALSE;
+	BOOL is_android_device = FALSE, is_test_signing_enabled = FALSE;
 	FILE* fd;
 	GUID guid;
 	SYSTEMTIME system_time;
 	FILETIME file_time, local_time;
+	SYSTEM_CODEINTEGRITY_INFORMATION sci = { 0 };
+	ULONG dwcbSz = 0;
 
 	MUTEX_START;
 
@@ -1054,11 +1221,14 @@ int LIBWDI_API wdi_prepare_driver(struct wdi_device_info* device_info, const cha
 		goto out;
 	}
 
-	if ((device_info == NULL) || (inf_name == NULL)) {
+	if ((device_info == NULL) || (inf == NULL)) {
 		wdi_err("One of the required parameter is NULL");
 		r = WDI_ERROR_INVALID_PARAM;
 		goto out;
 	}
+
+	// If we are dealing with a path (e.g. option 'external_inf'), remove the directory part
+	inf_name = (char*)filename(inf);
 
 	// Check the inf file provided and create the cat file name
 	if (strcmp(inf_name+safe_strlen(inf_name)-4, inf_ext) != 0) {
@@ -1249,9 +1419,12 @@ int LIBWDI_API wdi_prepare_driver(struct wdi_device_info* device_info, const cha
 		(int)driver_version[driver_type].dwFileVersionMS>>16, (int)driver_version[driver_type].dwFileVersionMS&0xFFFF,
 		(int)driver_version[driver_type].dwFileVersionLS>>16, (int)driver_version[driver_type].dwFileVersionLS&0xFFFF);
 
-	// Tokenize the file
-	if ((inf_file_size = tokenize_internal(inf_template[driver_type],
-		&dst, inf_entities, "#", "#", 0)) > 0) {
+	// Tokenize the inf
+	if ((options != NULL) && (options->external_inf))
+		inf_file_size = wdi_tokenize_file(inf, &dst, inf_entities, "#", "#", 0);
+	else
+		inf_file_size = wdi_tokenize_resource(inf_template[driver_type], &dst, inf_entities, "#", "#", 0);
+	if (inf_file_size > 0) {
 		fd = fopen_as_userU(inf_path, "w");
 		if (fd == NULL) {
 			wdi_err("Failed to create file: %s", inf_path);
@@ -1289,9 +1462,9 @@ int LIBWDI_API wdi_prepare_driver(struct wdi_device_info* device_info, const cha
 		wdi_info("Creating and self-signing a .cat file...");
 
 		// Tokenize the cat file (for WDF version)
-		if ((cat_file_size = tokenize_internal(cat_template[driver_type],
+		if ((cat_file_size = wdi_tokenize_resource(cat_template[driver_type],
 			&dst, inf_entities, "#", "#", 0)) <= 0) {
-			wdi_err("Could not tokenize cat file (%d)", inf_file_size);
+			wdi_err("Could not tokenize cat file (%d)", cat_file_size);
 			r = WDI_ERROR_ACCESS;
 			goto out;
 		}
@@ -1321,14 +1494,28 @@ int LIBWDI_API wdi_prepare_driver(struct wdi_device_info* device_info, const cha
 			ms_compat_id[driver_type]:inf_entities[DEVICE_HARDWARE_ID].replace);
 		static_sprintf(cert_subject, "CN=%s (libwdi autogenerated)", hw_id);
 
-		// Failures on the following aren't fatal errors
+		// Check if testsigning is enabled
+		// https://social.msdn.microsoft.com/Forums/Windowsapps/en-US/e6c1be93-7003-4594-b8e4-18ab4a75d273/detecting-testsigning-onoff-via-api
+		sci.Length = sizeof(sci);
+		if (NtQuerySystemInformation((SYSTEM_INFORMATION_CLASS)0x67, &sci, sizeof(sci), &dwcbSz) >= 0 && dwcbSz == sizeof(sci))
+			is_test_signing_enabled = !!(sci.CodeIntegrityOptions & 0x02);
+		wdi_info("Test signing is: %s", is_test_signing_enabled ? "Enabled" : "Disabled");
+
+		// Failures on the following are fatal on Windows 10 when test signing is not enabled
 		if (!CreateCat(cat_path, hw_id, drv_path, cat_list, nb_entries)) {
+			if (nWindowsVersion >= WINDOWS_10 && !is_test_signing_enabled) {
+				wdi_err("Could not create cat file");
+				return WDI_ERROR_CAT_MISSING;
+			}
 			wdi_warn("Could not create cat file");
 		} else if ((options != NULL) && (!options->disable_signing) && (!SelfSignFile(cat_path,
 			(options->cert_subject != NULL)?options->cert_subject:cert_subject))) {
+			if (nWindowsVersion >= WINDOWS_10 && !is_test_signing_enabled) {
+				wdi_err("Could not sign cat file");
+				return WDI_ERROR_UNSIGNED;
+			}
 			wdi_warn("Could not sign cat file");
 		}
-		safe_free(cat_in_copy);
 		safe_free(dst);
 	} else {
 		wdi_info("No .cat file generated (missing elevated privileges)");
@@ -1533,7 +1720,8 @@ static int install_driver_internal(void* arglist)
 		static_sprintf(exeargs, "\"%s\"", params->inf_name);
 	} else {
 		// Use libusb-win32's filter driver installer
-		static_sprintf(exename, "\"%s\\%s\\\\install-filter.exe\"", path, is_x64?"amd64":"x86");
+		static_strcat(path, is_x64 ? "\\amd64" : "\\x86");
+		static_sprintf(exename, "\"%s\\install-filter.exe\"", path);
 		if (safe_stricmp(current_device->upper_filter, filter_name) == 0) {
 			// Device already has the libusb-win32 filter => remove
 			static_strcpy(exeargs, "uninstall -d=");
@@ -1726,13 +1914,15 @@ out:
 }
 
 int LIBWDI_API wdi_install_driver(struct wdi_device_info* device_info, const char* path,
-								  const char* inf_name, struct wdi_options_install_driver* options)
+								  const char* inf, struct wdi_options_install_driver* options)
 {
 	struct install_driver_params params;
 	params.device_info = device_info;
-	params.inf_name = inf_name;
 	params.options = options;
 	params.path = path;
+
+	// If we are dealing with a path (e.g. option 'external_inf'), remove the directory part
+	params.inf_name = filename(inf);
 
 	if ((options == NULL) || (options->hWnd == NULL)) {
 		wdi_dbg("Using standard mode");
